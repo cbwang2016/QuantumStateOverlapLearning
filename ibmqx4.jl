@@ -104,63 +104,90 @@ function random_modify(circuit, gate_set)
 end
 
 
+
+
+
 using Flux.Optimise
 
 c = [1, -1, 1, -1, 1, -1, 1, -1];
+const cost_threshold = 2e-7
 # circuit = build_circuit()
-trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:5]
+trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:8]
 trainY = map(overlap, trainX)
-opt = Descent(4.0)
+opt = Descent(0.5)
+# opt = ADAM()
 
-function train(circuit)
+function train(circuit, trainX, trainY, cost_threshold)
     history = Float64[]
     last_cost = now_cost = 0
-    for i in 1:100
+    for i in 1:70
         last_cost = now_cost
         now_cost = cost(trainX, trainY, circuit, c)
         push!(history, now_cost)
         ps = parameters(circuit)
         # @show (i, ps, now_cost)
-        if abs(now_cost - last_cost) < 1e-8 || now_cost < 1e-7
+        if (abs(now_cost - last_cost) < cost_threshold / 3) || now_cost < cost_threshold
             # @show now_cost
             break
         end
         Optimise.update!(opt, ps, gradient(circuit, trainX, trainY, .001))
         popdispatch!(circuit, ps)
-        if i == 200
-            @show "Warning: failed to converge"
-        end
+        # if i == 200
+        #     println("Warning: failed to converge")
+        # end
     end
     return (now_cost, history)
 end
 
-function find_algo(annealing_param, d::Int64)
+function find_algo(annealing_param, d::Int64, trainX, trainY, max_steps::Int64, cost_threshold)
     gate_set = generate_gates_set(3)
     circuit = generate_init_circuit(3, d)
-    (best_cost, history) = train(circuit)
-    count = 0
+    (best_cost, history) = train(circuit, trainX, trainY, cost_threshold)
+    step = 0
     circuit_backup = circuit
-    while best_cost > 1e-7 && count < 5000
-        count += 1;
+    while best_cost > cost_threshold && step < max_steps
+        step += 1;
+        # if mod(step, 60) == 59 && d > 8
+        #
+        #     println("尝试压缩circuit")
+        #     newTrainY = [dot(i |> circuit |> probs, c) for i in map(build_state, trainX)]
+        #     (new_circuit, sucs) = find_algo(annealing_param, d - 1, trainX, newTrainY, 100, best_cost / 2)
+        #     if sucs
+        #         println("成功压缩circuit！！")
+        #         circuit = new_circuit
+        #         best_cost = cost(trainX, trainY, circuit, c)
+        #         while length(circuit) < d
+        #             push!(circuit, rand(gate_set))
+        #             if !validate_circuit(circuit)
+        #                 pop!(circuit)
+        #             end
+        #         end
+        #         continue
+        #     else
+        #         println("压缩circuit失败")
+        #     end
+        # end
+
         circuit_backup = copy(circuit)
         circuit = random_modify(circuit, gate_set)
-        (new_cost, history) = train(circuit)
+        (new_cost, history) = train(circuit, trainX, trainY, cost_threshold)
 
         accept_prob = exp(-annealing_param * (new_cost - best_cost))
         if new_cost < best_cost
-            @show (count, new_cost)
+            @show (step, new_cost)
             best_cost = new_cost
             continue
         elseif rand() < accept_prob
             # accept
-            best_cost = new_cost
+            # best_cost = new_cost
+            println("accepted")
         else
-            @show "fallback"
+            # println("fallback")
             circuit = circuit_backup
         end
-        @show (count, best_cost, new_cost, accept_prob)
+        @show (step, d, best_cost, accept_prob)
     end
-    return circuit
+    return (circuit, best_cost < cost_threshold)
 end
 
 function find_nearest_pi(x::Float64)
@@ -175,7 +202,7 @@ function enhance_circuit_to_pi(circuit)
     dispatch!(circuit, params)
 end
 
-# (tmp, history) = train(generate_init_circuit(3, 9))
+# (tmp, history) = train(generate_init_circuit(3, 9), trainX, trainY, cost_threshold)
 # using Plots
 # function plot_history(history)
 #     pyplot() # Choose a backend
@@ -185,6 +212,6 @@ end
 # end
 # plot_history(history)
 
-@show circuit = find_algo(4000.0, 8)
+@show (circuit, ) = find_algo(500.0, 9, trainX, trainY, 1000, cost_threshold)
 enhance_circuit_to_pi(circuit)
 @show cost(trainX, trainY, circuit, c)
