@@ -15,8 +15,8 @@ end
 
 # @show probs(build_state())
 
-function overlap(x::InitStateMatrix)
-    return dot(apply!(build_state(x), chain(3, control(2, 3=>X), put(2=>H))) |> probs, [1, 1, 1, -1, 1, 1, 1, -1])
+function overlap(mats::InitStateMatrix)
+    return dot(zero_state(2) |> chain(2, put(2, (1)=>matblock(mats.m1)), put(2, (2)=>matblock(mats.m2)), control(1, 2=>X), put(1=>H)) |> probs,[1, 1, 1, -1])
 end
 
 function cost(trainX, trainY, circuit, c)
@@ -108,25 +108,28 @@ using Flux.Optimise
 
 c = [1, -1, 1, -1, 1, -1, 1, -1];
 # circuit = build_circuit()
-trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:8]
+trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:5]
 trainY = map(overlap, trainX)
-opt = Descent(3.0)
+opt = Descent(4.0)
 
 function train(circuit)
     history = Float64[]
     last_cost = now_cost = 0
-    for i in 1:200
+    for i in 1:100
         last_cost = now_cost
         now_cost = cost(trainX, trainY, circuit, c)
         push!(history, now_cost)
         ps = parameters(circuit)
         # @show (i, ps, now_cost)
-        if abs(now_cost - last_cost) < 1e-9 || now_cost < 1e-8
+        if abs(now_cost - last_cost) < 1e-8 || now_cost < 1e-7
             # @show now_cost
             break
         end
         Optimise.update!(opt, ps, gradient(circuit, trainX, trainY, .001))
         popdispatch!(circuit, ps)
+        if i == 200
+            @show "Warning: failed to converge"
+        end
     end
     return (now_cost, history)
 end
@@ -137,7 +140,7 @@ function find_algo(annealing_param, d::Int64)
     (best_cost, history) = train(circuit)
     count = 0
     circuit_backup = circuit
-    while best_cost > 1e-8 && count < 1000
+    while best_cost > 1e-7 && count < 5000
         count += 1;
         circuit_backup = copy(circuit)
         circuit = random_modify(circuit, gate_set)
@@ -148,11 +151,14 @@ function find_algo(annealing_param, d::Int64)
             @show (count, new_cost)
             best_cost = new_cost
             continue
-        elseif rand() > accept_prob
+        elseif rand() < accept_prob
+            # accept
+            best_cost = new_cost
+        else
             @show "fallback"
             circuit = circuit_backup
         end
-        @show (count, accept_prob)
+        @show (count, best_cost, new_cost, accept_prob)
     end
     return circuit
 end
@@ -169,16 +175,16 @@ function enhance_circuit_to_pi(circuit)
     dispatch!(circuit, params)
 end
 
-@show circuit = find_algo(10.0, 9)
-enhance_circuit_to_pi(circuit)
-@show cost(trainX, trainY, circuit, c)
-# (now_cost, history) = train(circuit);
-
+# (tmp, history) = train(generate_init_circuit(3, 9))
 # using Plots
-#
 # function plot_history(history)
 #     pyplot() # Choose a backend
 #     fig1 = plot(history; legend=nothing)
 #     title!("training history")
 #     xlabel!("steps"); ylabel!("cost")
 # end
+# plot_history(history)
+
+@show circuit = find_algo(4000.0, 8)
+enhance_circuit_to_pi(circuit)
+@show cost(trainX, trainY, circuit, c)
