@@ -103,7 +103,7 @@ function generate_init_circuit(n::Int64, d::Int64)
 end
 
 function random_modify(circuit, gate_set)
-    circuit2 = copy(circuit)
+    circuit2 = deepcopy(circuit)
     index = rand(1:length(circuit2))
     # @show index
     circuit2[index] = rand(gate_set)
@@ -149,7 +149,7 @@ function find_algo(annealing_param, d::Int64)
     circuit_backup = circuit
     while best_cost > 1e-7 && count < 1000
         count += 1;
-        circuit_backup = copy(circuit)
+        circuit_backup = deepcopy(circuit)
         circuit = random_modify(circuit, gate_set)
         (new_cost, history) = train(circuit)
 
