@@ -131,7 +131,7 @@ function train(circuit)
         push!(history, now_cost)
         ps = parameters(circuit)
         # @show (i, ps, now_cost)
-        if abs(now_cost - last_cost) < 1e-8 || now_cost < 1e-7
+        if abs(now_cost - last_cost) < now_cost * .005 || now_cost < 1e-7
             # @show now_cost
             break
         end

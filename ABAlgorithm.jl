@@ -1,4 +1,5 @@
 using Yao, LinearAlgebra, YaoBlocks
+import Random.shuffle
 
 Ugate(nbit::Int, i::Int) = put(nbit, i=>chain(Rz(0), Rx(0), Rz(0)));
 Ugate(i::Int) = put(i=>chain(Rz(0), Rx(0), Rz(0)));
@@ -55,7 +56,28 @@ function validate_circuit(circuit)
         old = now
     end
 
+    if length(circuit) > 3 && length(param_indexes(circuit)) == 0
+        return false
+    end
+    if occupied_locs(circuit[length(circuit)]) != (1, )
+        return rand() < .2
+    end
+
     return true
+end
+
+function param_indexes(circuit, indexes)
+    rtn = []
+    for i in indexes
+        if nparameters(circuit[i]) > 0
+            push!(rtn, i)
+        end
+    end
+    return rtn
+end
+
+function param_indexes(circuit)
+    return param_indexes(circuit, [ 1:length(circuit); ])
 end
 
 function generate_init_circuit(n::Int64, d::Int64)
@@ -73,17 +95,18 @@ function generate_init_circuit(n::Int64, d::Int64)
     return rtn
 end
 
-function random_modify(circuit, circuit_indexes, gate_set)
-    circuit2 = deepcopy(circuit)
-    index = rand(circuit_indexes)
-    # @show index
-    circuit2[index] = rand(gate_set)
-    if validate_circuit(circuit2)
+function random_modify!(circuit2, circuit_indexes, gate_set)
+    for _ in 1:rand(1:5)
+        index = rand(circuit_indexes)
+        # @show index
+        circuit2[index] = rand(gate_set)
+
+        while !validate_circuit(circuit2)
+            circuit2[index] = rand(gate_set)
+        end
         params = rand(nparameters(circuit2[index])) * 2π .- π
         dispatch!(circuit2[index], params)
-        return circuit2
     end
-    return random_modify(circuit, circuit_indexes, gate_set)
 end
 
 function gradient(circuit, circuit_indexes, trainX, trainY, delta)
@@ -124,55 +147,71 @@ using Flux.Optimise
 c = [1, -1, 1, -1, 1, -1, 1, -1];
 const cost_threshold = 2e-7
 # circuit = build_circuit()
-trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:10]
+trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:5]
+testX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:5]
 trainY = map(overlap, trainX)
-opt = Descent(1.3)
+testY = map(overlap, testX)
+opt = Descent(1.2)
+d = 8
 # opt = ADAM(0.03, (0.9, 0.999))
 
-function train(circuit, circuit_indexes, trainX, trainY, cost_threshold)
+function train(circuit, circuit_indexes, trainX, trainY, testX, testY, cost_threshold)
     history = Float64[]
-    last_cost = now_cost = 0
-    for i in 1:100
-        last_cost = now_cost
-        now_cost = cost(trainX, trainY, circuit, c)
-        push!(history, now_cost)
+    last_cost = new_cost = 0
+    for i in 1:60
+        last_cost = new_cost
+        new_cost = cost(trainX, trainY, circuit, c)
+        # push!(history, new_cost)
         ps = parameters(circuit)
-        # @show (i, ps, now_cost)
-        if (abs(now_cost - last_cost) < cost_threshold / 3) || now_cost < cost_threshold
-            # @show now_cost
+        # @show (i, ps, new_cost)
+        if (abs(new_cost - last_cost) < new_cost * .005) || new_cost < cost_threshold
+            # @show new_cost
             break
         end
-        Optimise.update!(opt, ps, gradient(circuit, circuit_indexes, trainX, trainY, .001))
+
+        # Optimise only one gate each step
+        # This prevents local-minimal
+        for index in shuffle(circuit_indexes)
+            Optimise.update!(opt, ps, gradient(circuit, [ index ], trainX, trainY, .001))
+        end
+
         popdispatch!(circuit, ps)
-        # if i == 200
-        #     println("Warning: failed to converge")
-        # end
+        if i == 60
+            printstyled(IOContext(stdout, :color => true), "Warning: failed to converge\n", color=:red)
+        end
     end
-    return (now_cost, history)
+    return (new_cost, history)
 end
 
 function compress_subsequence(annealing_param, circuit, trainX, cost_threshold)
     rtn = deepcopy(circuit)
+
+    # generate random circuit_indexes
     index1 = rand([ 1:length(circuit) - 1; ])
     index2 = rand([ index1 + 1:min(index1 + 4, length(circuit)); ]) # try to compress 2-5 gates
-    circuit_indexes = [ index1:index2 - 1; ]
-    rtn[index2] = Ugate(nqubits(circuit), 1)                    # id gate
-    if !validate_circuit(rtn)
-        rtn[index2] = Ugate(nqubits(circuit), 2)
-    end
-    max_steps = 5 * (index2 - index1)
+    circuit_indexes = [ index1+1:index2; ]
+    max_steps = 10 * (index2 - index1)
 
-    gate_set = generate_gates_set(3)
+    gate_set = generate_gates_set(nqubits(circuit))
+
+    rtn[index1] = Ugate(nqubits(rtn), rand([ 1:nqubits(rtn); ]))
+    while !validate_circuit(rtn)
+        rtn[index1] = Ugate(nqubits(rtn), rand([ 1:nqubits(rtn); ]))
+    end
+
     newTrainY = [dot(i |> build_state |> circuit |> probs, c) for i in trainX]
-    (best_cost, history) = train(rtn, circuit_indexes, trainX, newTrainY, cost_threshold)
+    newTestY = [dot(i |> build_state |> circuit |> probs, c) for i in testX]
+    train(rtn, param_indexes(rtn, circuit_indexes), trainX, newTrainY, testX, newTestY, cost_threshold)
+    best_cost = cost(testX, newTestY, rtn, c)
     step = 0
 
     while best_cost > cost_threshold && step < max_steps
         step += 1;
 
         circuit_backup = deepcopy(rtn)
-        rtn = random_modify(rtn, circuit_indexes, gate_set)
-        (new_cost, history) = train(rtn, [ 1:length(circuit); ], trainX, newTrainY, cost_threshold)
+        random_modify!(rtn, circuit_indexes, gate_set)
+        train(rtn, param_indexes(rtn, circuit_indexes), trainX, newTrainY, testX, newTestY, cost_threshold)
+        new_cost = cost(testX, newTestY, rtn, c)
 
         accept_prob = exp(-annealing_param * (new_cost - best_cost))
         if new_cost < best_cost
@@ -191,27 +230,25 @@ function compress_subsequence(annealing_param, circuit, trainX, cost_threshold)
     end
 
     sucs = best_cost < cost_threshold
-    if sucs
-        rtn[index2] = Ugate(nqubits(circuit), rand([ 1:nqubits(rtn); ]))
-        while !validate_circuit(rtn)
-            rtn[index2] = Ugate(nqubits(circuit), rand([ 1:nqubits(rtn); ]))
-        end
-    end
     return (rtn, sucs)
 end
 
 function find_algo(annealing_param, d::Int64, trainX, trainY, max_steps::Int64, cost_threshold)
     gate_set = generate_gates_set(3)
     circuit = generate_init_circuit(3, d)
-    (best_cost, history) = train(circuit, [ 1:length(circuit); ], trainX, trainY, cost_threshold)
+    train(circuit, param_indexes(circuit), trainX, trainY, testX, testY, cost_threshold)
+    best_cost = cost(testX, testY, circuit, c)
+
     step = 0
     circuit_backup = circuit
     while best_cost > cost_threshold && step < max_steps
         step += 1;
 
         circuit_backup = deepcopy(circuit)
-        circuit = random_modify(circuit, [ 1:length(circuit); ], gate_set)
-        (new_cost, history) = train(circuit, [ 1:length(circuit); ], trainX, trainY, cost_threshold)
+        random_modify!(circuit, [ 1:length(circuit); ], gate_set)
+
+        train(circuit, param_indexes(circuit), trainX, trainY, testX, testY, cost_threshold)
+        new_cost = cost(testX, testY, circuit, c)
 
         accept_prob = exp(-annealing_param * (new_cost - best_cost))
         if new_cost < best_cost
@@ -229,20 +266,24 @@ function find_algo(annealing_param, d::Int64, trainX, trainY, max_steps::Int64, 
 
 
         if mod(step, 5) == 0
-            # println("tring to compress")
+            printstyled(IOContext(stdout, :color => true), "tring to compress...\n", color=:blue)
 
             (new_circuit, sucs) = compress_subsequence(annealing_param, circuit, trainX, cost_threshold)
 
             if sucs
-                println("compress succeeded!")
+                @show circuit
+                printstyled(IOContext(stdout, :color => true), "compress succeeded!\n", color=:green)
 
                 circuit = new_circuit
-                best_cost = cost(trainX, trainY, circuit, c)
+                best_cost = cost(testX, testY, circuit, c)
 
             else
-                println("compress failed!")
+                printstyled(IOContext(stdout, :color => true), "compress failed!\n", color=:cyan)
             end
             @show (step, d, best_cost)
+            if mod(step, 100) == 0
+                @show circuit
+            end
         end
     end
     return (circuit, best_cost < cost_threshold)
@@ -271,6 +312,6 @@ end
 # plot_history(history)
 
 # annealing_param 必须是100000数量级
-@show (circuit, ) = find_algo(70000.0, 8, trainX, trainY, 5000, cost_threshold)
+@show (circuit, ) = find_algo(70000.0, d, trainX, trainY, 500000, cost_threshold)
 enhance_circuit_to_pi(circuit)
 @show cost(trainX, trainY, circuit, c)

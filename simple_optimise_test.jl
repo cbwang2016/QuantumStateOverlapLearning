@@ -1,4 +1,5 @@
 using Yao, LinearAlgebra, YaoBlocks
+import Random.shuffle
 
 Ugate(nbit::Int, i::Int) = put(nbit, i=>chain(Rz(0), Rx(0), Rz(0)));
 Ugate(i::Int) = put(i=>chain(Rz(0), Rx(0), Rz(0)));
@@ -55,7 +56,21 @@ function validate_circuit(circuit)
         old = now
     end
 
+    if length(circuit) > 3 && length(param_indexes(circuit)) == 0
+        return false
+    end
+
     return true
+end
+
+function param_indexes(circuit)
+    rtn = []
+    for i in 1:length(circuit)
+        if nparameters(circuit[i]) > 0
+            push!(rtn, i)
+        end
+    end
+    return rtn
 end
 
 function generate_init_circuit(n::Int64, d::Int64)
@@ -125,37 +140,47 @@ c = [1, -1, 1, -1, 1, -1, 1, -1];
 const cost_threshold = 2e-7
 # circuit = build_circuit()
 trainX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:10]
+testX = [InitStateMatrix(rand_unitary(2), rand_unitary(2)) for _ in 1:10]
 trainY = map(overlap, trainX)
+testY = map(overlap, testX)
 opt = Descent(.9)
 # opt = ADAM(0.03, (0.9, 0.999))
 
-function train(circuit, circuit_indexes, trainX, trainY, cost_threshold)
+function train(circuit, circuit_indexes, trainX, trainY, testX, testY, cost_threshold)
     history = Float64[]
+    history2 = Float64[]
     last_cost = now_cost = 0
-    for i in 1:100
+    for i in 1:50
         last_cost = now_cost
-        now_cost = cost(trainX, trainY, circuit, c)
-        push!(history, now_cost)
+        now_cost = cost(testX, testY, circuit, c)
+        push!(history, cost(trainX, trainY, circuit, c))
+        push!(history2, now_cost)
         ps = parameters(circuit)
         # @show (i, ps, now_cost)
-        if (abs(now_cost - last_cost) < cost_threshold / 3) || now_cost < cost_threshold
+        if (abs(now_cost - last_cost) < now_cost * .005) || now_cost < cost_threshold
             # @show now_cost
             break
         end
-        Optimise.update!(opt, ps, gradient(circuit, circuit_indexes, trainX, trainY, .001))
+
+        # prevent local-minimal
+        for index in shuffle(circuit_indexes)
+            Optimise.update!(opt, ps, gradient(circuit, [ index ], trainX, trainY, .001))
+        end
         popdispatch!(circuit, ps)
         # if i == 200
         #     println("Warning: failed to converge")
         # end
     end
-    return (now_cost, history)
+    return (now_cost, history, history2)
 end
 
-(tmp, history) = train(generate_init_circuit(3, 9), [ 1:length(circuit); ], trainX, trainY, cost_threshold)
+test_circuit = generate_init_circuit(3, 9)
+(tmp, history, history2) = train(test_circuit, param_indexes(test_circuit), trainX, trainY, testX, testY, cost_threshold)
+# (tmp, history, history2) = train(test, [ rand(param_indexes(test)) ], trainX, trainY, testX, testY, cost_threshold)
 using Plots
 function plot_history(history)
     pyplot() # Choose a backend
-    fig1 = plot(history; legend=nothing)
+    fig1 = plot([history, history2]; legend=nothing)
     title!("training history")
     xlabel!("steps"); ylabel!("cost")
 end
